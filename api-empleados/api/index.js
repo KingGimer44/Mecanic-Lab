@@ -150,7 +150,37 @@ module.exports = async (req, res) => {
     });
     return;
   }
+  // --- LOGIN ---
+  if (method === "POST" && cleanUrl === "/api/login") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { email, password } = JSON.parse(body);
 
+        // Buscar el usuario en la base de datos por email y contraseña
+        // ¡ADVERTENCIA!: En una aplicación real, las contraseñas nunca deben almacenarse ni compararse en texto plano.
+        // Debes usar un hash seguro (ej. bcrypt) para almacenar y verificar contraseñas.
+        const result = await db.execute({
+          sql: `SELECT id, name, email, role FROM users WHERE email = ? AND password = ?`,
+          args: [email, password]
+        });
+
+        if (result.rows.length > 0) {
+          // Usuario encontrado, inicio de sesión exitoso
+          const user = result.rows[0];
+          res.status(200).json({ message: "Inicio de sesión exitoso", user: user });
+        } else {
+          // Credenciales inválidas
+          res.status(401).json({ error: "Credenciales inválidas" });
+        }
+      } catch (err) {
+        console.error("Error en el inicio de sesión:", err);
+        res.status(500).json({ error: "Error al intentar iniciar sesión" });
+      }
+    });
+    return;
+  }
   // Ruta por defecto
   res.status(404).json({ error: "Ruta no encontrada" });
 }; 
