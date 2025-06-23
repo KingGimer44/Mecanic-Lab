@@ -181,6 +181,30 @@ module.exports = async (req, res) => {
     });
     return;
   }
+  // --- OBJECTIVES (PUT to update) ---
+if (method === "PUT" && cleanUrl.startsWith("/api/objectives/")) {
+  const objectiveId = cleanUrl.split("/").pop(); // Extraer el ID del objetivo de la URL
+  let body = "";
+  req.on("data", chunk => { body += chunk; });
+  req.on("end", async () => {
+    try {
+      const { is_completed } = JSON.parse(body);
+      if (is_completed === undefined) {
+        return res.status(400).json({ error: "Campo 'is_completed' es requerido para la actualización." });
+      }
+
+      await db.execute({
+        sql: `UPDATE objectives SET is_completed = ? WHERE id = ?`,
+        args: [is_completed ? 1 : 0, objectiveId] // Asegura que se guarda 1 o 0
+      });
+      res.status(200).json({ message: "Objetivo actualizado correctamente" });
+    } catch (err) {
+      console.error("Error al actualizar objetivo:", err);
+      res.status(500).json({ error: "Error al actualizar objetivo" });
+    }
+  });
+  return;
+}
   // Ruta por defecto
   res.status(404).json({ error: "Ruta no encontrada" });
 }; 
