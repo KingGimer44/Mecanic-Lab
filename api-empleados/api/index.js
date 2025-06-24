@@ -59,8 +59,21 @@ module.exports = async (req, res) => {
           sql: `INSERT INTO jobs (id, client_name, car_brand_model, issue_description, progress, user_id) VALUES (?, ?, ?, ?, ?, ?)` ,
           args: [id, client_name, car_brand_model, issue_description, progress || 0, user_id]
         });
-        res.status(201).json({ message: "Trabajo creado" });
+
+        // --- NOTIFICACIÓN PARA EL ADMIN: Nuevo trabajo creado ---
+        const adminResult = await db.execute(`SELECT id FROM users WHERE role = 'admin' LIMIT 1`);
+        if (adminResult.rows.length > 0) {
+          const adminUserId = adminResult.rows[0].id;
+          const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          await db.execute({
+            sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+            args: [notificationId, adminUserId, `Se ha creado un nuevo trabajo para ${client_name} (${car_brand_model}).`, 'new_job', id]
+          });
+        }
+
+        res.status(201).json({ message: "Trabajo creado y notificación enviada al admin" });
       } catch (err) {
+        console.error("Error al crear trabajo o enviar notificación:", err);
         res.status(500).json({ error: "Error al crear trabajo" });
       }
     });
@@ -147,6 +160,26 @@ module.exports = async (req, res) => {
           sql: sqlQuery,
           args: [availabilityValue, partId]
         });
+
+        // --- NOTIFICACIÓN PARA EL USUARIO: Pieza disponible ---
+        if (is_available) { // Solo enviar notificación cuando se marca como disponible
+            const partRequestResult = await db.execute({
+                sql: `SELECT user_id, part_name FROM part_requests WHERE id = ?`,
+                args: [partId]
+            });
+
+            if (partRequestResult.rows.length > 0) {
+                const requesterUserId = partRequestResult.rows[0].user_id;
+                const requestedPartName = partRequestResult.rows[0].part_name;
+                const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+                await db.execute({
+                    sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+                    args: [notificationId, requesterUserId, `Tu pieza "${requestedPartName}" ya está disponible.`, 'part_available', partId]
+                });
+            }
+        }
+
         res.status(200).json({ message: "Disponibilidad de pieza actualizada correctamente" });
       } catch (err) {
         console.error("Error al actualizar la disponibilidad de la pieza:", err);
@@ -185,7 +218,18 @@ module.exports = async (req, res) => {
           args: [id, part_name, false] // Al solicitarla, inicialmente NO está disponible
         });
 
-        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario (no disponible)" });
+        // --- NOTIFICACIÓN PARA EL ADMIN: Nueva petición de pieza ---
+        const adminResult = await db.execute(`SELECT id FROM users WHERE role = 'admin' LIMIT 1`);
+        if (adminResult.rows.length > 0) {
+          const adminUserId = adminResult.rows[0].id;
+          const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          await db.execute({
+            sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+            args: [notificationId, adminUserId, `Nueva petición de pieza: ${part_name} para ${car_brand_model}.`, 'part_request', id]
+          });
+        }
+
+        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario (no disponible), notificación enviada" });
       } catch (err) {
         console.error("Error al crear petición de pieza o añadir a inventario:", err);
         res.status(500).json({ error: "Error al crear petición de pieza o añadir a inventario" });
@@ -193,6 +237,26 @@ module.exports = async (req, res) => {
     });
     return;
   }
+
+  // --- NOTIFICATIONS ---
+  if (method === "GET" && cleanUrl === "/api/notifications") {
+    try {
+      const userId = req.url.split('?')[1]?.split('=')[1]; // Extrae el user_id de los query params
+      if (!userId) {
+        return res.status(400).json({ error: "El parámetro 'user_id' es requerido." });
+      }
+      const result = await db.execute({
+        sql: `SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC`,
+        args: [userId]
+      });
+      res.status(200).json(result.rows);
+    } catch (err) {
+      console.error("Error al obtener notificaciones:", err);
+      res.status(500).json({ error: "Error al obtener notificaciones" });
+    }
+    return;
+  }
+
   // --- LOGIN ---
   if (method === "POST" && cleanUrl === "/api/login") {
     let body = "";
@@ -224,30 +288,53 @@ module.exports = async (req, res) => {
     });
     return;
   }
-  // --- OBJECTIVES (PUT to update) ---
-if (method === "PUT" && cleanUrl.startsWith("/api/objectives/")) {
-  const objectiveId = cleanUrl.split("/").pop(); // Extraer el ID del objetivo de la URL
-  let body = "";
-  req.on("data", chunk => { body += chunk; });
-  req.on("end", async () => {
-    try {
-      const { is_completed } = JSON.parse(body);
-      if (is_completed === undefined) {
-        return res.status(400).json({ error: "Campo 'is_completed' es requerido para la actualización." });
-      }
 
-      await db.execute({
-        sql: `UPDATE objectives SET is_completed = ? WHERE id = ?`,
-        args: [is_completed ? 1 : 0, objectiveId] // Asegura que se guarda 1 o 0
-      });
-      res.status(200).json({ message: "Objetivo actualizado correctamente" });
-    } catch (err) {
-      console.error("Error al actualizar objetivo:", err);
-      res.status(500).json({ error: "Error al actualizar objetivo" });
-    }
-  });
-  return;
-}
+  // --- NOTIFICATIONS (PUT to mark as read) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/notifications/") && cleanUrl.endsWith("/read")) {
+    const notificationId = cleanUrl.split('/')[cleanUrl.split('/').length - 2]; // Extrae el ID de la URL
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        // No necesitamos un cuerpo, simplemente marcamos como leída
+        await db.execute({
+          sql: `UPDATE notifications SET is_read = ? WHERE id = ?`,
+          args: [true, notificationId]
+        });
+        res.status(200).json({ message: "Notificación marcada como leída correctamente" });
+      } catch (err) {
+        console.error("Error al marcar notificación como leída:", err);
+        res.status(500).json({ error: "Error al marcar notificación como leída" });
+      }
+    });
+    return;
+  }
+
+  // --- OBJECTIVES (PUT to update) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/objectives/")) {
+    const objectiveId = cleanUrl.split("/").pop(); // Extraer el ID del objetivo de la URL
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { is_completed } = JSON.parse(body);
+        if (is_completed === undefined) {
+          return res.status(400).json({ error: "Campo 'is_completed' es requerido para la actualización." });
+        }
+
+        await db.execute({
+          sql: `UPDATE objectives SET is_completed = ? WHERE id = ?`,
+          args: [is_completed ? 1 : 0, objectiveId] // Asegura que se guarda 1 o 0
+        });
+        res.status(200).json({ message: "Objetivo actualizado correctamente" });
+      } catch (err) {
+        console.error("Error al actualizar objetivo:", err);
+        res.status(500).json({ error: "Error al actualizar objetivo" });
+      }
+    });
+    return;
+  }
+
   // Ruta por defecto
   res.status(404).json({ error: "Ruta no encontrada" });
 }; 
