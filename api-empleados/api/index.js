@@ -456,6 +456,29 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // --- NOTIFICATIONS (PUT to mark as read) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/notifications/") && cleanUrl.endsWith("/read")) {
+    console.log('Clean URL for notification read:', cleanUrl); // Añadir para depuración
+    const notificationId = cleanUrl.split('/')[cleanUrl.split('/').length - 2];
+    console.log('Attempting to extract notificationId:', notificationId); // Añadir para depuración
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        // No necesitamos un cuerpo, simplemente marcamos como leída
+        await db.execute({
+          sql: `UPDATE notifications SET is_read = ? WHERE id = ?`,
+          args: [true, notificationId]
+        });
+        res.status(200).json({ message: "Notificación marcada como leída" });
+      } catch (err) {
+        console.error("Error al marcar notificación como leída:", err);
+        res.status(500).json({ error: "Error al marcar notificación como leída" });
+      }
+    });
+    return;
+  }
+
   // --- LOGIN ---
   if (method === "POST" && cleanUrl === "/api/login") {
     let body = "";
