@@ -327,6 +327,22 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // --- PARTS (DELETE) ---
+  if (method === "DELETE" && cleanUrl.startsWith("/api/parts/")) {
+    const partId = cleanUrl.split("/").pop(); // Extraer el ID de la pieza de la URL
+    try {
+      await db.execute({
+        sql: `DELETE FROM parts WHERE id = ?`,
+        args: [partId]
+      });
+      res.status(200).json({ message: "Pieza eliminada correctamente" });
+    } catch (err) {
+      console.error("Error al eliminar la pieza:", err);
+      res.status(500).json({ error: "Error al eliminar la pieza" });
+    }
+    return;
+  }
+
   // --- JOB FINALIZATION REQUESTS ---
   if (method === "POST" && cleanUrl === "/api/job_finalization_requests") {
     let body = "";
