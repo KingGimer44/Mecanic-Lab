@@ -123,6 +123,31 @@ module.exports = async (req, res) => {
     return;
   }
 
+// --- PARTS (PUT to update availability) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/parts/")) {
+    const partId = cleanUrl.split("/").pop(); // Extraer el ID de la pieza de la URL
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { is_available } = JSON.parse(body);
+        if (is_available === undefined) {
+          return res.status(400).json({ error: "Campo 'is_available' es requerido para la actualización." });
+        }
+
+        await db.execute({
+          sql: `UPDATE parts SET is_available = ? WHERE id = ?`,
+          args: [is_available ? 1 : 0, partId] // Asegura que se guarda 1 (true) o 0 (false)
+        });
+        res.status(200).json({ message: "Disponibilidad de pieza actualizada correctamente" });
+      } catch (err) {
+        console.error("Error al actualizar la disponibilidad de la pieza:", err);
+        res.status(500).json({ error: "Error al actualizar la disponibilidad de la pieza" });
+      }
+    });
+    return;
+  }
+
   // --- PART REQUESTS ---
   if (method === "GET" && cleanUrl === "/api/part_requests") {
     try {
@@ -139,13 +164,22 @@ module.exports = async (req, res) => {
     req.on("end", async () => {
       try {
         const { id, part_name, car_brand_model, user_id, status } = JSON.parse(body);
+        
+        // Insertar en part_requests
         await db.execute({
           sql: `INSERT INTO part_requests (id, part_name, car_brand_model, user_id, status) VALUES (?, ?, ?, ?, ?)` ,
           args: [id, part_name, car_brand_model, user_id, status || 'pending']
         });
-        res.status(201).json({ message: "Petición de pieza creada" });
+
+        // Insertar en parts también
+        await db.execute({
+          sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
+          args: [id, part_name, true] // Se asume que al solicitarla, inicialmente está disponible
+        });
+
+        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario" });
       } catch (err) {
-        res.status(500).json({ error: "Error al crear petición de pieza" });
+        res.status(500).json({ error: "Error al crear petición de pieza o añadir a inventario" });
       }
     });
     return;
