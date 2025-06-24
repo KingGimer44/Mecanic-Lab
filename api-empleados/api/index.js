@@ -174,7 +174,7 @@ module.exports = async (req, res) => {
         // Insertar en parts también
         await db.execute({
           sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
-          args: [id, part_name, true] // Se asume que al solicitarla, inicialmente está disponible
+          args: [id, part_name, false] // Se asume que al solicitarla, inicialmente está disponible
         });
 
         res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario" });
