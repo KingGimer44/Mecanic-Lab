@@ -331,13 +331,36 @@ module.exports = async (req, res) => {
   if (method === "DELETE" && cleanUrl.startsWith("/api/parts/")) {
     const partId = cleanUrl.split("/").pop(); // Extraer el ID de la pieza de la URL
     try {
+      // Primero, obtener el nombre de la pieza antes de eliminarla para la notificación
+      const partResult = await db.execute({
+        sql: `SELECT name FROM parts WHERE id = ?`,
+        args: [partId]
+      });
+      const partName = partResult.rows.length > 0 ? partResult.rows[0].name : 'Desconocida';
+
       await db.execute({
         sql: `DELETE FROM parts WHERE id = ?`,
         args: [partId]
       });
-      res.status(200).json({ message: "Pieza eliminada correctamente" });
+
+      // --- NOTIFICACIÓN PARA LOS ADMINS: Pieza eliminada ---
+      const adminResults = await db.execute(`SELECT id, push_token FROM users WHERE role = 'admin'`);
+      for (const adminUser of adminResults.rows) {
+        const notificationMessage = `Se ha eliminado la pieza: "${partName}" (ID: ${partId}).`;
+        const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+        await db.execute({
+          sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+          args: [notificationId, adminUser.id, notificationMessage, 'part_deleted', partId]
+        });
+        // Enviar push notification al admin
+        if (adminUser.push_token) {
+          await sendPushNotification(adminUser.push_token, 'Pieza Eliminada', notificationMessage);
+        }
+      }
+
+      res.status(200).json({ message: "Pieza eliminada correctamente y administradores notificados" });
     } catch (err) {
-      console.error("Error al eliminar la pieza:", err);
+      console.error("Error al eliminar la pieza o enviar notificación:", err);
       res.status(500).json({ error: "Error al eliminar la pieza" });
     }
     return;
