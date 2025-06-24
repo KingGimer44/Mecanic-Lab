@@ -131,13 +131,21 @@ module.exports = async (req, res) => {
     req.on("end", async () => {
       try {
         const { is_available } = JSON.parse(body);
+        console.log("PUT /api/parts/:id - partId:", partId);
+        console.log("PUT /api/parts/:id - received is_available:", is_available);
+
         if (is_available === undefined) {
           return res.status(400).json({ error: "Campo 'is_available' es requerido para la actualización." });
         }
 
+        const availabilityValue = is_available ? 1 : 0;
+        console.log("PUT /api/parts/:id - converting to DB value:", availabilityValue);
+        const sqlQuery = `UPDATE parts SET is_available = ? WHERE id = ?`;
+        console.log("PUT /api/parts/:id - SQL Query:", sqlQuery, "Args:", [availabilityValue, partId]);
+
         await db.execute({
-          sql: `UPDATE parts SET is_available = ? WHERE id = ?`,
-          args: [is_available ? 1 : 0, partId] // Asegura que se guarda 1 (true) o 0 (false)
+          sql: sqlQuery,
+          args: [availabilityValue, partId]
         });
         res.status(200).json({ message: "Disponibilidad de pieza actualizada correctamente" });
       } catch (err) {
@@ -171,14 +179,15 @@ module.exports = async (req, res) => {
           args: [id, part_name, car_brand_model, user_id, status || 'pending']
         });
 
-        // Insertar en parts también
+        // Insertar en parts también, con is_available en false inicialmente
         await db.execute({
           sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
-          args: [id, part_name, false] // Se asume que al solicitarla, inicialmente está disponible
+          args: [id, part_name, false] // Al solicitarla, inicialmente NO está disponible
         });
 
-        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario" });
+        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario (no disponible)" });
       } catch (err) {
+        console.error("Error al crear petición de pieza o añadir a inventario:", err);
         res.status(500).json({ error: "Error al crear petición de pieza o añadir a inventario" });
       }
     });
