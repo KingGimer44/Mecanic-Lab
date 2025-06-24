@@ -1,559 +1,541 @@
-const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const bodyParser = require('body-parser');
-const cors = require('cors');
+const { createClient } = require("@libsql/client");
 
-const app = express();
-const port = 3000;
-
-app.use(cors());
-app.use(bodyParser.json());
-
-const db = new sqlite3.Database('./database.db', (err) => {
-    if (err) {
-        console.error('Error opening database:', err.message);
-    } else {
-        console.log('Connected to the SQLite database.');
-        db.run(`CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            password TEXT,
-            role TEXT,
-            expo_push_token TEXT
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            client_name TEXT,
-            car_brand_model TEXT,
-            issue_description TEXT,
-            is_completed INTEGER DEFAULT 0,
-            user_id INTEGER,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS objectives (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER,
-            description TEXT,
-            is_completed INTEGER DEFAULT 0,
-            FOREIGN KEY (job_id) REFERENCES jobs(id)
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS part_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER,
-            user_id INTEGER,
-            part_name TEXT,
-            request_date TEXT,
-            is_urgent INTEGER DEFAULT 0,
-            FOREIGN KEY (job_id) REFERENCES jobs(id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS parts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            is_available INTEGER DEFAULT 0
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            title TEXT,
-            message TEXT,
-            is_read INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`);
-        db.run(`CREATE TABLE IF NOT EXISTS job_finalization_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER,
-            user_id INTEGER,
-            request_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-            is_approved INTEGER DEFAULT 0,
-            FOREIGN KEY (job_id) REFERENCES jobs(id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )`);
-    }
+const db = createClient({
+  url: process.env.DATABASE_URL,
+  authToken: process.env.DATABASE_AUTH_TOKEN,
 });
 
-// Helper function to send push notifications
-async function sendPushNotification(token, title, message) {
-    if (!token) {
-        console.log('No Expo push token for user, skipping push notification.');
-        return;
-    }
+// --- Función para enviar notificaciones push ---
+async function sendPushNotification(pushToken, title, body, data = {}) {
+  const message = {
+    to: pushToken,
+    sound: 'default',
+    title,
+    body,
+    data,
+  };
 
-    const notification = {
-        to: token,
-        title: title,
-        body: message,
-        sound: 'default',
-    };
-
-    try {
-        await fetch('https://exp.host/--/api/v2/push/send', {
-            method: 'POST',
-            headers: {
-                Accept: 'application/json',
-                'Accept-encoding': 'gzip, deflate',
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(notification),
-        });
-        console.log('Push notification sent successfully.');
-    } catch (error) {
-        console.error('Error sending push notification:', error);
-    }
+  await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Accept-encoding': 'gzip, deflate',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(message),
+  });
 }
 
-// GET all jobs
-app.get('/api/jobs', (req, res) => {
-    db.all('SELECT * FROM jobs', [], (err, rows) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json(rows);
-    });
-});
+module.exports = async (req, res) => {
+  // Parsear método y ruta
+  const { method, url } = req;
+  // Quitar query params
+  const cleanUrl = url.split('?')[0];
 
-// POST a new job
-app.post('/api/jobs', (req, res) => {
-    const { client_name, car_brand_model, issue_description, user_id } = req.body;
-    db.run(
-        'INSERT INTO jobs (client_name, car_brand_model, issue_description, user_id) VALUES (?, ?, ?, ?)',
-        [client_name, car_brand_model, issue_description, user_id],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            const jobId = this.lastID;
-            // Notify admins about new job
-            db.all('SELECT expo_push_token FROM users WHERE role = "admin"', [], (err, admins) => {
-                if (err) {
-                    console.error('Error fetching admin tokens:', err.message);
-                    return;
-                }
-                admins.forEach(admin => {
-                    sendPushNotification(admin.expo_push_token, 'Nuevo Trabajo Creado', `Se ha creado un nuevo trabajo para ${client_name}.`);
-                    db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                        [admin.id, 'Nuevo Trabajo Creado', `Se ha creado un nuevo trabajo para ${client_name}.`]);
-                });
-            });
-            res.status(201).json({ id: jobId, client_name, car_brand_model, issue_description, user_id });
-        }
-    );
-});
-
-// GET objectives for a specific job
-app.get('/api/objectives/:job_id', (req, res) => {
-    const { job_id } = req.params;
-    db.all('SELECT * FROM objectives WHERE job_id = ?', [job_id], (err, rows) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json(rows);
-    });
-});
-
-// POST a new objective
-app.post('/api/objectives', (req, res) => {
-    const { job_id, description } = req.body;
-    db.run(
-        'INSERT INTO objectives (job_id, description) VALUES (?, ?)',
-        [job_id, description],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            res.status(201).json({ id: this.lastID, job_id, description });
-        }
-    );
-});
-
-// PUT (update) an objective
-app.put('/api/objectives/:id', (req, res) => {
-    const { id } = req.params;
-    const { is_completed } = req.body;
-    db.run(
-        'UPDATE objectives SET is_completed = ? WHERE id = ?',
-        [is_completed, id],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            if (this.changes === 0) {
-                res.status(404).json({ "error": "Objective not found." });
-            } else {
-                res.json({ message: 'Objective updated successfully.', changes: this.changes });
-            }
-        }
-    );
-});
-
-// GET all part requests
-app.get('/api/part_requests', (req, res) => {
-    db.all('SELECT * FROM part_requests', [], (err, rows) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json(rows);
-    });
-});
-
-// POST a new part request
-app.post('/api/part_requests', (req, res) => {
-    const { job_id, user_id, part_name, is_urgent } = req.body;
-    const request_date = new Date().toISOString();
-
-    db.serialize(() => {
-        db.run(
-            'INSERT INTO part_requests (job_id, user_id, part_name, request_date, is_urgent) VALUES (?, ?, ?, ?, ?)',
-            [job_id, user_id, part_name, request_date, is_urgent],
-            function (err) {
-                if (err) {
-                    res.status(400).json({ "error": err.message });
-                    return;
-                }
-                const partRequestId = this.lastID;
-
-                // Also insert into 'parts' table with is_available = 0
-                db.run(
-                    'INSERT INTO parts (name, is_available) VALUES (?, ?)',
-                    [part_name, 0],
-                    function (err) {
-                        if (err) {
-                            res.status(400).json({ "error": err.message });
-                            return;
-                        }
-                        const newPartId = this.lastID;
-                        // Notify admins about new part request
-                        db.all('SELECT id, expo_push_token FROM users WHERE role = "admin"', [], (err, admins) => {
-                            if (err) {
-                                console.error('Error fetching admin tokens:', err.message);
-                                return;
-                            }
-                            admins.forEach(admin => {
-                                sendPushNotification(admin.expo_push_token, 'Nueva Solicitud de Pieza', `Se ha solicitado la pieza "${part_name}" para el trabajo ${job_id}.`);
-                                db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                                    [admin.id, 'Nueva Solicitud de Pieza', `Se ha solicitado la pieza "${part_name}" para el trabajo ${job_id}.`]);
-                            });
-                        });
-                        res.status(201).json({ id: partRequestId, job_id, user_id, part_name, request_date, is_urgent, newPartId });
-                    }
-                );
-            }
-        );
-    });
-});
-
-// GET all parts
-app.get('/api/parts', (req, res) => {
-    db.all('SELECT * FROM parts', [], (err, rows) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        res.json(rows);
-    });
-});
-
-// PUT (update) a part's availability
-app.put('/api/parts/:id', (req, res) => {
-    const { id } = req.params;
-    const { is_available } = req.body;
-    console.log(`Received PUT for /api/parts/${id} with is_available: ${is_available}`);
-
-    db.run(
-        'UPDATE parts SET is_available = ? WHERE id = ?',
-        [is_available ? 1 : 0, id],
-        function (err) {
-            if (err) {
-                console.error('Error updating part availability:', err.message);
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            if (this.changes === 0) {
-                res.status(404).json({ "error": "Part not found." });
-            } else {
-                console.log(`Part ${id} updated, changes: ${this.changes}`);
-                // Notify user who requested the part that it's now available
-                db.get('SELECT user_id, part_name FROM part_requests WHERE id = (SELECT MAX(id) FROM part_requests WHERE part_name = (SELECT name FROM parts WHERE id = ?))', [id], (err, partRequest) => {
-                    if (err) {
-                        console.error('Error fetching part request for notification:', err.message);
-                        return;
-                    }
-                    if (partRequest && partRequest.user_id) {
-                        db.get('SELECT expo_push_token FROM users WHERE id = ?', [partRequest.user_id], (err, user) => {
-                            if (err) {
-                                console.error('Error fetching user token for notification:', err.message);
-                                return;
-                            }
-                            if (user && user.expo_push_token) {
-                                sendPushNotification(user.expo_push_token, 'Pieza Disponible', `La pieza "${partRequest.part_name}" ya está disponible.`);
-                                db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                                    [partRequest.user_id, 'Pieza Disponible', `La pieza "${partRequest.part_name}" ya está disponible.`]);
-                            }
-                        });
-                    }
-                });
-                res.json({ message: 'Part updated successfully.', changes: this.changes });
-            }
-        }
-    );
-});
-
-// NEW: DELETE a part
-app.delete('/api/parts/:id', (req, res) => {
-    const { id } = req.params;
-    let deletedPartName;
-
-    db.get('SELECT name FROM parts WHERE id = ?', [id], (err, row) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        if (!row) {
-            res.status(404).json({ "error": "Part not found." });
-            return;
-        }
-        deletedPartName = row.name;
-
-        db.run('DELETE FROM parts WHERE id = ?', [id], function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            if (this.changes === 0) {
-                res.status(404).json({ "error": "Part not found." });
-            } else {
-                // Notify all admins about the deleted part
-                db.all('SELECT id, expo_push_token FROM users WHERE role = "admin"', [], (err, admins) => {
-                    if (err) {
-                        console.error('Error fetching admin tokens for deletion notification:', err.message);
-                        return;
-                    }
-                    admins.forEach(admin => {
-                        sendPushNotification(admin.expo_push_token, 'Pieza Eliminada', `La pieza "${deletedPartName}" ha sido eliminada por un administrador.`);
-                        db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                            [admin.id, 'Pieza Eliminada', `La pieza "${deletedPartName}" ha sido eliminada por un administrador.`]);
-                    });
-                });
-                res.json({ message: 'Part deleted successfully.', changes: this.changes, deleted_part_name: deletedPartName });
-            }
+  // --- USERS ---
+  if (method === "GET" && cleanUrl === "/api/users") {
+    try {
+      const result = await db.execute("SELECT * FROM users");
+      res.status(200).json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: "Error al obtener usuarios" });
+    }
+    return;
+  }
+  if (method === "POST" && cleanUrl === "/api/users") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, name, email, password, role } = JSON.parse(body);
+        await db.execute({
+          sql: `INSERT INTO users (id, name, email, password, role) VALUES (?, ?, ?, ?, ?)` ,
+          args: [id, name, email, password, role || 'user']
         });
+        res.status(201).json({ message: "Usuario creado" });
+      } catch (err) {
+        res.status(500).json({ error: "Error al crear usuario" });
+      }
     });
-});
+    return;
+  }
 
-// GET notifications for a user
-app.get('/api/notifications/:user_id', (req, res) => {
-    const { user_id } = req.params;
-    db.all('SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC', [user_id], (err, rows) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
+  // --- USERS (SAVE PUSH TOKEN) ---
+  if (method === "POST" && cleanUrl === "/api/users/save-push-token") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { userId, pushToken } = JSON.parse(body);
+        if (!userId || !pushToken) {
+          return res.status(400).json({ error: "userId y pushToken son requeridos." });
         }
-        res.json(rows);
+        // Actualizar el push_token para el usuario
+        await db.execute({
+          sql: `UPDATE users SET push_token = ? WHERE id = ?`,
+          args: [pushToken, userId]
+        });
+        res.status(200).json({ message: "Push token guardado exitosamente." });
+      } catch (err) {
+        console.error("Error al guardar push token:", err);
+        res.status(500).json({ error: "Error al guardar push token." });
+      }
     });
-});
+    return;
+  }
 
-// PUT (mark as read) a notification
-app.put('/api/notifications/:id/read', (req, res) => {
-    const { id } = req.params;
-    db.run('UPDATE notifications SET is_read = 1 WHERE id = ?', [id], function (err) {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
+  // --- JOBS ---
+  if (method === "GET" && cleanUrl === "/api/jobs") {
+    try {
+      const result = await db.execute("SELECT * FROM jobs");
+      res.status(200).json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: "Error al obtener trabajos" });
+    }
+    return;
+  }
+  if (method === "POST" && cleanUrl === "/api/jobs") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, client_name, car_brand_model, issue_description, progress, user_id } = JSON.parse(body);
+        await db.execute({
+          sql: `INSERT INTO jobs (id, client_name, car_brand_model, issue_description, progress, user_id) VALUES (?, ?, ?, ?, ?, ?)` ,
+          args: [id, client_name, car_brand_model, issue_description, progress || 0, user_id]
+        });
+
+        // --- NOTIFICACIÓN PARA EL ADMIN: Nuevo trabajo creado ---
+        const adminResult = await db.execute(`SELECT id, push_token FROM users WHERE role = 'admin' LIMIT 1`);
+        if (adminResult.rows.length > 0) {
+          const adminUser = adminResult.rows[0];
+          const adminUserId = adminUser.id;
+          const notificationMessage = `Se ha creado un nuevo trabajo para ${client_name} (${car_brand_model}).`;
+          const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          await db.execute({
+            sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+            args: [notificationId, adminUserId, notificationMessage, 'new_job', id]
+          });
+          // Enviar push notification al admin
+          if (adminUser.push_token) {
+            await sendPushNotification(adminUser.push_token, 'Nuevo Trabajo', notificationMessage);
+          }
         }
-        if (this.changes === 0) {
-            res.status(404).json({ "error": "Notification not found." });
+
+        res.status(201).json({ message: "Trabajo creado y notificación enviada al admin" });
+      } catch (err) {
+        console.error("Error al crear trabajo o enviar notificación:", err);
+        res.status(500).json({ error: "Error al crear trabajo" });
+      }
+    });
+    return;
+  }
+
+  // --- JOBS (PUT to finalize) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/jobs/") && cleanUrl.endsWith("/finalize")) {
+    const jobId = cleanUrl.split('/')[cleanUrl.split('/').length - 2]; // Extraer el ID del trabajo
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { is_completed } = JSON.parse(body);
+        if (is_completed === undefined) {
+          return res.status(400).json({ error: "El campo 'is_completed' es requerido para la actualización." });
+        }
+
+        await db.execute({
+          sql: `UPDATE jobs SET is_completed = ? WHERE id = ?`,
+          args: [is_completed ? 1 : 0, jobId]
+        });
+        res.status(200).json({ message: "Trabajo finalizado correctamente" });
+      } catch (err) {
+        console.error("Error al finalizar el trabajo:", err);
+        res.status(500).json({ error: "Error al finalizar el trabajo" });
+      }
+    });
+    return;
+  }
+
+  // --- OBJECTIVES ---
+  if (method === "GET" && cleanUrl === "/api/objectives") {
+    try {
+      const result = await db.execute("SELECT * FROM objectives");
+      res.status(200).json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: "Error al obtener objetivos" });
+    }
+    return;
+  }
+  if (method === "POST" && cleanUrl === "/api/objectives") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, job_id, description, is_completed } = JSON.parse(body);
+        await db.execute({
+          sql: `INSERT INTO objectives (id, job_id, description, is_completed) VALUES (?, ?, ?, ?)` ,
+          args: [id, job_id, description, is_completed || false]
+        });
+        res.status(201).json({ message: "Objetivo creado" });
+      } catch (err) {
+        res.status(500).json({ error: "Error al crear objetivo" });
+      }
+    });
+    return;
+  }
+
+  // --- PARTS ---
+  if (method === "GET" && cleanUrl === "/api/parts") {
+    try {
+      const result = await db.execute("SELECT * FROM parts");
+      res.status(200).json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: "Error al obtener piezas" });
+    }
+    return;
+  }
+  if (method === "POST" && cleanUrl === "/api/parts") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, name, is_available } = JSON.parse(body);
+        await db.execute({
+          sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
+          args: [id, name, is_available || true]
+        });
+        res.status(201).json({ message: "Pieza creada" });
+      } catch (err) {
+        res.status(500).json({ error: "Error al crear pieza" });
+      }
+    });
+    return;
+  }
+
+// --- PARTS (PUT to update availability) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/parts/")) {
+    const partId = cleanUrl.split("/").pop(); // Extraer el ID de la pieza de la URL
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { is_available } = JSON.parse(body);
+        console.log("PUT /api/parts/:id - partId:", partId);
+        console.log("PUT /api/parts/:id - received is_available:", is_available);
+
+        if (is_available === undefined) {
+          return res.status(400).json({ error: "Campo 'is_available' es requerido para la actualización." });
+        }
+
+        const availabilityValue = is_available ? 1 : 0;
+        console.log("PUT /api/parts/:id - converting to DB value:", availabilityValue);
+        const sqlQuery = `UPDATE parts SET is_available = ? WHERE id = ?`;
+        console.log("PUT /api/parts/:id - SQL Query:", sqlQuery, "Args:", [availabilityValue, partId]);
+
+        await db.execute({
+          sql: sqlQuery,
+          args: [availabilityValue, partId]
+        });
+
+        // --- NOTIFICACIÓN PARA EL USUARIO: Pieza disponible ---
+        if (is_available) { // Solo enviar notificación cuando se marca como disponible
+            const partRequestResult = await db.execute({
+                sql: `SELECT user_id, part_name FROM part_requests WHERE id = ?`,
+                args: [partId]
+            });
+
+            if (partRequestResult.rows.length > 0) {
+                const requester = partRequestResult.rows[0];
+                const requesterUserId = requester.user_id;
+                const requestedPartName = requester.part_name;
+                const notificationMessage = `Tu pieza "${requestedPartName}" ya está disponible.`;
+                const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+
+                await db.execute({
+                    sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+                    args: [notificationId, requesterUserId, notificationMessage, 'part_available', partId]
+                });
+                // Enviar push notification al usuario
+                const userResult = await db.execute({ sql: `SELECT push_token FROM users WHERE id = ?`, args: [requesterUserId] });
+                if (userResult.rows.length > 0 && userResult.rows[0].push_token) {
+                    await sendPushNotification(userResult.rows[0].push_token, 'Pieza Disponible', notificationMessage);
+                }
+            }
+        }
+
+        res.status(200).json({ message: "Disponibilidad de pieza actualizada correctamente" });
+      } catch (err) {
+        console.error("Error al actualizar la disponibilidad de la pieza:", err);
+        res.status(500).json({ error: "Error al actualizar la disponibilidad de la pieza" });
+      }
+    });
+    return;
+  }
+
+  // --- PART REQUESTS ---
+  if (method === "GET" && cleanUrl === "/api/part_requests") {
+    try {
+      const result = await db.execute("SELECT * FROM part_requests");
+      res.status(200).json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: "Error al obtener peticiones de piezas" });
+    }
+    return;
+  }
+  if (method === "POST" && cleanUrl === "/api/part_requests") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, part_name, car_brand_model, user_id, status } = JSON.parse(body);
+        
+        // Insertar en part_requests
+        await db.execute({
+          sql: `INSERT INTO part_requests (id, part_name, car_brand_model, user_id, status) VALUES (?, ?, ?, ?, ?)` ,
+          args: [id, part_name, car_brand_model, user_id, status || 'pending']
+        });
+
+        // Insertar en parts también, con is_available en false inicialmente
+        await db.execute({
+          sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
+          args: [id, part_name, false] // Al solicitarla, inicialmente NO está disponible
+        });
+
+        // --- NOTIFICACIÓN PARA EL ADMIN: Nueva petición de pieza ---
+        const adminResult = await db.execute(`SELECT id, push_token FROM users WHERE role = 'admin' LIMIT 1`);
+        if (adminResult.rows.length > 0) {
+          const adminUser = adminResult.rows[0];
+          const adminUserId = adminUser.id;
+          const notificationMessage = `Nueva petición de pieza: ${part_name} para ${car_brand_model}.`;
+          const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          await db.execute({
+            sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+            args: [notificationId, adminUserId, notificationMessage, 'part_request', id]
+          });
+          // Enviar push notification al admin
+          if (adminUser.push_token) {
+            await sendPushNotification(adminUser.push_token, 'Nueva Petición de Pieza', notificationMessage);
+          }
+        }
+
+        res.status(201).json({ message: "Petición de pieza creada y pieza añadida a inventario (no disponible), notificación enviada" });
+      } catch (err) {
+        console.error("Error al crear petición de pieza o añadir a inventario:", err);
+        res.status(500).json({ error: "Error al crear petición de pieza o añadir a inventario" });
+      }
+    });
+    return;
+  }
+
+  // --- JOB FINALIZATION REQUESTS ---
+  if (method === "POST" && cleanUrl === "/api/job_finalization_requests") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { id, job_id, user_id, status, request_message } = JSON.parse(body);
+        await db.execute({
+          sql: `INSERT INTO job_finalization_requests (id, job_id, user_id, status, request_message) VALUES (?, ?, ?, ?, ?)` ,
+          args: [id, job_id, user_id, status || 'pending', request_message]
+        });
+
+        // --- NOTIFICACIÓN PARA EL ADMIN: Solicitud de finalización de trabajo ---
+        const adminResult = await db.execute(`SELECT id, push_token FROM users WHERE role = 'admin' LIMIT 1`);
+        if (adminResult.rows.length > 0) {
+          const adminUser = adminResult.rows[0];
+          const adminUserId = adminUser.id;
+          const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          await db.execute({
+            sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`,
+            args: [notificationId, adminUserId, request_message, 'job_finalization_request', id]
+          });
+          // Enviar push notification al admin
+          if (adminUser.push_token) {
+            await sendPushNotification(adminUser.push_token, 'Solicitud de Finalización', request_message);
+          }
+        }
+
+        res.status(201).json({ message: "Solicitud de finalización de trabajo creada y notificación enviada al admin" });
+      } catch (err) {
+        console.error("Error al crear solicitud de finalización de trabajo o enviar notificación:", err);
+        res.status(500).json({ error: "Error al crear solicitud de finalización de trabajo" });
+      }
+    });
+    return;
+  }
+
+  // --- JOB FINALIZATION REQUESTS (PUT to approve/reject) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/job_finalization_requests/")) {
+    const requestId = cleanUrl.split('/')[cleanUrl.split('/').length - 2]; // Extraer el ID de la solicitud
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        let statusToSet;
+        let messageToUser;
+
+        if (cleanUrl.endsWith("/approve")) {
+          statusToSet = 'approved';
+          // Obtener job_id y user_id de la solicitud para finalizar el trabajo y notificar al usuario
+          const requestResult = await db.execute({ sql: `SELECT job_id, user_id FROM job_finalization_requests WHERE id = ?`, args: [requestId] });
+          if (requestResult.rows.length > 0) {
+            const { job_id, user_id } = requestResult.rows[0];
+            // Marcar el trabajo como completado
+            await db.execute({ sql: `UPDATE jobs SET is_completed = ? WHERE id = ?`, args: [true, job_id] });
+            // Obtener detalles del trabajo para la notificación
+            const jobResult = await db.execute({ sql: `SELECT client_name, car_brand_model FROM jobs WHERE id = ?`, args: [job_id] });
+            const jobName = jobResult.rows[0]?.client_name + ' - ' + jobResult.rows[0]?.car_brand_model;
+            messageToUser = `Tu solicitud para finalizar el trabajo "${jobName}" ha sido APROBADA.`;
+            // Notificar al usuario
+            const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+            await db.execute({ sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`, args: [notificationId, user_id, messageToUser, 'job_finalization_approved', job_id] });
+            // Enviar push notification al usuario
+            const userResult = await db.execute({ sql: `SELECT push_token FROM users WHERE id = ?`, args: [user_id] });
+            if (userResult.rows.length > 0 && userResult.rows[0].push_token) {
+                await sendPushNotification(userResult.rows[0].push_token, 'Solicitud Aprobada', messageToUser);
+            }
+          } else {
+            return res.status(404).json({ error: "Solicitud no encontrada para aprobar" });
+          }
+        } else if (cleanUrl.endsWith("/reject")) {
+          statusToSet = 'rejected';
+          // Obtener user_id y job_id de la solicitud para notificar al usuario
+          const requestResult = await db.execute({ sql: `SELECT job_id, user_id FROM job_finalization_requests WHERE id = ?`, args: [requestId] });
+          if (requestResult.rows.length > 0) {
+            const { job_id, user_id } = requestResult.rows[0];
+            // Obtener detalles del trabajo para la notificación
+            const jobResult = await db.execute({ sql: `SELECT client_name, car_brand_model FROM jobs WHERE id = ?`, args: [job_id] });
+            const jobName = jobResult.rows[0]?.client_name + ' - ' + jobResult.rows[0]?.car_brand_model;
+            messageToUser = `Tu solicitud para finalizar el trabajo "${jobName}" ha sido RECHAZADA.`;
+            // Notificar al usuario
+            const notificationId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+            await db.execute({ sql: `INSERT INTO notifications (id, user_id, message, type, related_id) VALUES (?, ?, ?, ?, ?)`, args: [notificationId, user_id, messageToUser, 'job_finalization_rejected', job_id] });
+            // Enviar push notification al usuario
+            const userResult = await db.execute({ sql: `SELECT push_token FROM users WHERE id = ?`, args: [user_id] });
+            if (userResult.rows.length > 0 && userResult.rows[0].push_token) {
+                await sendPushNotification(userResult.rows[0].push_token, 'Solicitud Rechazada', messageToUser);
+            }
+          } else {
+            return res.status(404).json({ error: "Solicitud no encontrada para rechazar" });
+          }
         } else {
-            res.json({ message: 'Notification marked as read.', changes: this.changes });
-        }
-    });
-});
-
-// POST user registration
-app.post('/api/register', (req, res) => {
-    const { username, password, role, expo_push_token } = req.body;
-    db.run(
-        'INSERT INTO users (username, password, role, expo_push_token) VALUES (?, ?, ?, ?)',
-        [username, password, role || 'user', expo_push_token],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            res.status(201).json({ id: this.lastID, username, role: role || 'user' });
-        }
-    );
-});
-
-// POST user login
-app.post('/api/login', (req, res) => {
-    const { username, password, expo_push_token } = req.body;
-    db.get('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (err, row) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        if (!row) {
-            res.status(401).json({ "error": "Invalid credentials." });
-            return;
+          return res.status(400).json({ error: "Ruta de acción no válida para la solicitud de finalización." });
         }
 
-        // Update Expo push token if provided
-        if (expo_push_token && row.expo_push_token !== expo_push_token) {
-            db.run('UPDATE users SET expo_push_token = ? WHERE id = ?', [expo_push_token, row.id], (updateErr) => {
-                if (updateErr) {
-                    console.error('Error updating Expo push token:', updateErr.message);
-                } else {
-                    console.log('Expo push token updated for user:', row.username);
-                }
-            });
-        }
-        res.json({ user: { id: row.id, username: row.username, role: row.role } });
-    });
-});
-
-// POST a job finalization request (for normal users)
-app.post('/api/job_finalization_requests', (req, res) => {
-    const { job_id, user_id } = req.body;
-    db.run(
-        'INSERT INTO job_finalization_requests (job_id, user_id) VALUES (?, ?)',
-        [job_id, user_id],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            const requestId = this.lastID;
-            // Notify admins about new finalization request
-            db.get('SELECT client_name, car_brand_model FROM jobs WHERE id = ?', [job_id], (err, job) => {
-                if (err) {
-                    console.error('Error fetching job details for finalization notification:', err.message);
-                    return;
-                }
-                const jobTitle = job ? `${job.client_name} - ${job.car_brand_model}` : `ID ${job_id}`;
-                db.all('SELECT id, expo_push_token FROM users WHERE role = "admin"', [], (err, admins) => {
-                    if (err) {
-                        console.error('Error fetching admin tokens:', err.message);
-                        return;
-                    }
-                    admins.forEach(admin => {
-                        sendPushNotification(admin.expo_push_token, 'Solicitud de Finalización de Trabajo', `El usuario ha solicitado la finalización del trabajo: ${jobTitle}.`);
-                        db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                            [admin.id, 'Solicitud de Finalización de Trabajo', `El usuario ha solicitado la finalización del trabajo: ${jobTitle}.`]);
-                    });
-                });
-                res.status(201).json({ id: requestId, job_id, user_id, message: 'Job finalization request submitted.' });
-            });
-        }
-    );
-});
-
-// PUT approve job finalization request (for admins)
-app.put('/api/job_finalization_requests/:id/approve', (req, res) => {
-    const { id } = req.params;
-    db.get('SELECT job_id, user_id FROM job_finalization_requests WHERE id = ?', [id], (err, request) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        if (!request) {
-            res.status(404).json({ "error": "Finalization request not found." });
-            return;
-        }
-
-        db.serialize(() => {
-            db.run('UPDATE job_finalization_requests SET is_approved = 1 WHERE id = ?', [id], function (err) {
-                if (err) {
-                    res.status(400).json({ "error": err.message });
-                    return;
-                }
-                db.run('UPDATE jobs SET is_completed = 1 WHERE id = ?', [request.job_id], function (err) {
-                    if (err) {
-                        res.status(400).json({ "error": err.message });
-                        return;
-                    }
-                    // Notify user who made the request
-                    db.get('SELECT expo_push_token FROM users WHERE id = ?', [request.user_id], (err, user) => {
-                        if (err) {
-                            console.error('Error fetching user token for approval notification:', err.message);
-                            return;
-                        }
-                        if (user && user.expo_push_token) {
-                            sendPushNotification(user.expo_push_token, 'Solicitud Aprobada', 'Tu solicitud de finalización de trabajo ha sido aprobada.');
-                            db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                                [request.user_id, 'Solicitud Aprobada', 'Tu solicitud de finalización de trabajo ha sido aprobada.']);
-                        }
-                    });
-                    res.json({ message: 'Job finalization request approved and job marked as completed.' });
-                });
-            });
+        // Actualizar el estado de la solicitud de finalización
+        await db.execute({
+          sql: `UPDATE job_finalization_requests SET status = ? WHERE id = ?`,
+          args: [statusToSet, requestId]
         });
+
+        res.status(200).json({ message: `Solicitud ${statusToSet} correctamente.` });
+      } catch (err) {
+        console.error(`Error al ${statusToSet} la solicitud de finalización:`, err);
+        res.status(500).json({ error: `Error al ${statusToSet} la solicitud de finalización.` });
+      }
     });
-});
+    return;
+  }
 
-// PUT reject job finalization request (for admins)
-app.put('/api/job_finalization_requests/:id/reject', (req, res) => {
-    const { id } = req.params;
-    db.get('SELECT job_id, user_id FROM job_finalization_requests WHERE id = ?', [id], (err, request) => {
-        if (err) {
-            res.status(400).json({ "error": err.message });
-            return;
-        }
-        if (!request) {
-            res.status(404).json({ "error": "Finalization request not found." });
-            return;
-        }
+  // --- NOTIFICATIONS ---
+  if (method === "GET" && cleanUrl === "/api/notifications") {
+    try {
+      const userId = req.url.split('?')[1]?.split('=')[1]; // Extrae el user_id de los query params
+      if (!userId) {
+        return res.status(400).json({ error: "El parámetro 'user_id' es requerido." });
+      }
+      const result = await db.execute({
+        sql: `SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC`,
+        args: [userId]
+      });
+      res.status(200).json(result.rows);
+    } catch (err) {
+      console.error("Error al obtener notificaciones:", err);
+      res.status(500).json({ error: "Error al obtener notificaciones" });
+    }
+    return;
+  }
 
-        db.run('DELETE FROM job_finalization_requests WHERE id = ?', [id], function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            // Notify user who made the request
-            db.get('SELECT expo_push_token FROM users WHERE id = ?', [request.user_id], (err, user) => {
-                if (err) {
-                    console.error('Error fetching user token for rejection notification:', err.message);
-                    return;
-                }
-                if (user && user.expo_push_token) {
-                    sendPushNotification(user.expo_push_token, 'Solicitud Rechazada', 'Tu solicitud de finalización de trabajo ha sido rechazada.');
-                    db.run('INSERT INTO notifications (user_id, title, message) VALUES (?, ?, ?)',
-                        [request.user_id, 'Solicitud Rechazada', 'Tu solicitud de finalización de trabajo ha sido rechazada.']);
-                }
-            });
-            res.json({ message: 'Job finalization request rejected.' });
+  // --- NOTIFICATIONS (PUT to mark as read) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/notifications/") && cleanUrl.endsWith("/read")) {
+    console.log('Clean URL for notification read:', cleanUrl); // Añadir para depuración
+    const notificationId = cleanUrl.split('/')[cleanUrl.split('/').length - 2];
+    console.log('Attempting to extract notificationId:', notificationId); // Añadir para depuración
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        // No necesitamos un cuerpo, simplemente marcamos como leída
+        await db.execute({
+          sql: `UPDATE notifications SET is_read = ? WHERE id = ?`,
+          args: [true, notificationId]
         });
+        res.status(200).json({ message: "Notificación marcada como leída" });
+      } catch (err) {
+        console.error("Error al marcar notificación como leída:", err);
+        res.status(500).json({ error: "Error al marcar notificación como leída" });
+      }
     });
-});
+    return;
+  }
 
+  // --- LOGIN ---
+  if (method === "POST" && cleanUrl === "/api/login") {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { email, password } = JSON.parse(body);
 
-// PUT (update) a job to be completed directly (for admins)
-app.put('/api/jobs/:id/finalize', (req, res) => {
-    const { id } = req.params;
-    db.run(
-        'UPDATE jobs SET is_completed = 1 WHERE id = ?',
-        [id],
-        function (err) {
-            if (err) {
-                res.status(400).json({ "error": err.message });
-                return;
-            }
-            if (this.changes === 0) {
-                res.status(404).json({ "error": "Job not found." });
-            } else {
-                res.json({ message: 'Job marked as completed successfully.', changes: this.changes });
-            }
+        // Buscar el usuario en la base de datos por email y contraseña
+        // ¡ADVERTENCIA!: En una aplicación real, las contraseñas nunca deben almacenarse ni compararse en texto plano.
+        // Debes usar un hash seguro (ej. bcrypt) para almacenar y verificar contraseñas.
+        const result = await db.execute({
+          sql: `SELECT id, name, email, role FROM users WHERE email = ? AND password = ?`,
+          args: [email, password]
+        });
+
+        if (result.rows.length > 0) {
+          // Usuario encontrado, inicio de sesión exitoso
+          const user = result.rows[0];
+          res.status(200).json({ message: "Inicio de sesión exitoso", user: user });
+        } else {
+          // Credenciales inválidas
+          res.status(401).json({ error: "Credenciales inválidas" });
         }
-    );
-});
+      } catch (err) {
+        console.error("Error en el inicio de sesión:", err);
+        res.status(500).json({ error: "Error al intentar iniciar sesión" });
+      }
+    });
+    return;
+  }
 
+  // --- OBJECTIVES (PUT to update) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/objectives/")) {
+    const objectiveId = cleanUrl.split("/").pop(); // Extraer el ID del objetivo de la URL
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { is_completed } = JSON.parse(body);
+        if (is_completed === undefined) {
+          return res.status(400).json({ error: "Campo 'is_completed' es requerido para la actualización." });
+        }
 
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
+        await db.execute({
+          sql: `UPDATE objectives SET is_completed = ? WHERE id = ?`,
+          args: [is_completed ? 1 : 0, objectiveId] // Asegura que se guarda 1 o 0
+        });
+        res.status(200).json({ message: "Objetivo actualizado correctamente" });
+      } catch (err) {
+        console.error("Error al actualizar objetivo:", err);
+        res.status(500).json({ error: "Error al actualizar objetivo" });
+      }
+    });
+    return;
+  }
+
+  // Ruta por defecto
+  res.status(404).json({ error: "Ruta no encontrada" });
+}; 
