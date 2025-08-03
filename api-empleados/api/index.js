@@ -99,11 +99,10 @@ module.exports = async (req, res) => {
     req.on("data", chunk => { body += chunk; });
     req.on("end", async () => {
       try {
-        const { id, client_name, car_brand_model, issue_description, progress, user_id } = JSON.parse(body);
+        const { id, client_name, car_brand_model, issue_description, progress, user_id, is_completed } = JSON.parse(body);
         await db.execute({
-          sql: `INSERT INTO jobs (id, client_name, car_brand_model, issue_description, progress, user_id) VALUES (?, ?, ?, ?, ?, ?)` ,
-          args: [id, client_name, car_brand_model, issue_description, progress || 0, user_id]
-        });
+          sql: `INSERT INTO jobs (id, client_name, car_brand_model, issue_description, progress, user_id, is_completed) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: [id, client_name, car_brand_model, issue_description, progress || 0,
 
         // --- NOTIFICACIÓN PARA EL ADMIN: Nuevo trabajo creado ---
         const adminResult = await db.execute(`SELECT id, push_token FROM users WHERE role = 'admin' LIMIT 1`);
