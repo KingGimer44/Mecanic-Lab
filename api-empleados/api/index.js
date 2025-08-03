@@ -227,7 +227,7 @@ module.exports = async (req, res) => {
         const { id, name, is_available } = JSON.parse(body);
         await db.execute({
           sql: `INSERT INTO parts (id, name, is_available) VALUES (?, ?, ?)` ,
-          args: [id, name, is_available || true]
+          args: [id, name, is_available || 0]
         });
         res.status(201).json({ message: "Pieza creada" });
       } catch (err) {
