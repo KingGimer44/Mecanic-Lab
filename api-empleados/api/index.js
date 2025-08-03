@@ -133,7 +133,7 @@ module.exports = async (req, res) => {
 
   // --- JOBS (PUT to finalize) ---
   if (method === "PUT" && cleanUrl.startsWith("/api/jobs/") && cleanUrl.endsWith("/finalize")) {
-    const jobId = cleanUrl.split('/')[cleanUrl.split('/').length - 2]; // Extraer el ID del trabajo
+    const jobId = cleanUrl.split('/')[cleanUrl.split('/').length - 2];
     let body = "";
     req.on("data", chunk => { body += chunk; });
     req.on("end", async () => {
@@ -142,15 +142,40 @@ module.exports = async (req, res) => {
         if (is_completed === undefined) {
           return res.status(400).json({ error: "El campo 'is_completed' es requerido para la actualización." });
         }
-
+        // Guardar el valor recibido (0, 1, 2)
         await db.execute({
           sql: `UPDATE jobs SET is_completed = ? WHERE id = ?`,
-          args: [is_completed ? 1 : 0, jobId]
+          args: [is_completed, jobId]
         });
         res.status(200).json({ message: "Trabajo finalizado correctamente" });
       } catch (err) {
         console.error("Error al finalizar el trabajo:", err);
         res.status(500).json({ error: "Error al finalizar el trabajo" });
+      }
+    });
+    return;
+  }
+  
+  // --- JOBS (PUT to update status) ---
+  if (method === "PUT" && cleanUrl.startsWith("/api/jobs/") && cleanUrl.endsWith("/status")) {
+    const jobId = cleanUrl.split('/')[cleanUrl.split('/').length - 2];
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const { status } = JSON.parse(body);
+        if (status === undefined) {
+          return res.status(400).json({ error: "El campo 'status' es requerido para la actualización." });
+        }
+        // Guardar el valor recibido (0, 1, 2)
+        await db.execute({
+          sql: `UPDATE jobs SET is_completed = ? WHERE id = ?`,
+          args: [status, jobId]
+        });
+        res.status(200).json({ message: "Estado del trabajo actualizado correctamente" });
+      } catch (err) {
+        console.error("Error al actualizar estado del trabajo:", err);
+        res.status(500).json({ error: "Error al actualizar estado del trabajo" });
       }
     });
     return;
